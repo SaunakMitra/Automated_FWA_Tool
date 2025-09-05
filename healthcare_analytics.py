@@ -11,6 +11,8 @@ warnings.filterwarnings('ignore')
 
 # Import FWA scenarios module
 from fwa_scenarios import PythonScenarios, MLScenarios
+import json
+import hashlib
 
 # Page configuration
 st.set_page_config(
@@ -219,6 +221,52 @@ def load_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
+# Function to save field mappings
+def save_field_mapping(data_columns, field_mappings):
+    """Save field mappings based on data structure hash"""
+    # Create a hash of column names for identification
+    columns_hash = hashlib.md5('|'.join(sorted(data_columns)).encode()).hexdigest()
+    
+    mapping_data = {
+        'columns_hash': columns_hash,
+        'columns': data_columns,
+        'mappings': field_mappings,
+        'timestamp': datetime.now().isoformat()
+    }
+    
+    # Save to session state
+    if 'saved_mappings' not in st.session_state:
+        st.session_state.saved_mappings = {}
+    
+    st.session_state.saved_mappings[columns_hash] = mapping_data
+    
+    # Also save to a JSON file for persistence
+    try:
+        with open('field_mappings.json', 'w') as f:
+            json.dump(st.session_state.saved_mappings, f, indent=2)
+    except:
+        pass  # Ignore file save errors
+
+# Function to load field mappings
+def load_field_mapping(data_columns):
+    """Load previously saved field mappings if available"""
+    columns_hash = hashlib.md5('|'.join(sorted(data_columns)).encode()).hexdigest()
+    
+    # Try to load from session state first
+    if 'saved_mappings' in st.session_state and columns_hash in st.session_state.saved_mappings:
+        return st.session_state.saved_mappings[columns_hash]['mappings']
+    
+    # Try to load from file
+    try:
+        with open('field_mappings.json', 'r') as f:
+            saved_mappings = json.load(f)
+            if columns_hash in saved_mappings:
+                st.session_state.saved_mappings = saved_mappings
+                return saved_mappings[columns_hash]['mappings']
+    except:
+        pass  # Ignore file load errors
+    
+    return None
 class HealthcareAnalytics:
     def __init__(self):
         # Updated field list with new fields
@@ -325,6 +373,109 @@ class HealthcareAnalytics:
         
         return mappings
 
+    def create_dashboard_charts(self, df, selected_fields, date_range=None, version_filter=None):
+        """Create dashboard charts based on selected fields"""
+        charts = []
+        insights = []
+        
+        # Filter data based on selections
+        filtered_df = df.copy()
+        
+        if date_range and 'Treatment from date' in df.columns:
+            try:
+                df['Treatment from date'] = pd.to_datetime(df['Treatment from date'], errors='coerce')
+                filtered_df = filtered_df[
+                    (filtered_df['Treatment from date'] >= date_range[0]) & 
+                    (filtered_df['Treatment from date'] <= date_range[1])
+                ]
+            except:
+                pass
+        
+        if version_filter and 'Claim_version' in df.columns:
+            filtered_df = filtered_df[filtered_df['Claim_version'].isin(version_filter)]
+        
+        for field in selected_fields:
+            if field not in filtered_df.columns:
+                continue
+                
+            # Create chart based on field type
+            if pd.api.types.is_numeric_dtype(filtered_df[field]):
+                # Numeric field - histogram and box plot
+                fig = make_subplots(
+                    rows=1, cols=2,
+                    subplot_titles=[f'{field} Distribution', f'{field} Box Plot'],
+                    specs=[[{"secondary_y": False}, {"secondary_y": False}]]
+                )
+                
+                # Histogram
+                fig.add_trace(
+                    go.Histogram(x=filtered_df[field].dropna(), name='Distribution', 
+                               marker_color='rgba(102, 126, 234, 0.7)'),
+                    row=1, col=1
+                )
+                
+                # Box plot
+                fig.add_trace(
+                    go.Box(y=filtered_df[field].dropna(), name='Box Plot',
+                          marker_color='rgba(118, 75, 162, 0.7)'),
+                    row=1, col=2
+                )
+                
+                fig.update_layout(
+                    title=f'{field} Analysis',
+                    template='plotly_dark',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    height=400
+                )
+                
+                # Generate insights
+                stats = filtered_df[field].describe()
+                insight = f"""
+                **{field} Insights:**
+                - Mean: {stats['mean']:.2f}
+                - Median: {stats['50%']:.2f}
+                - Standard Deviation: {stats['std']:.2f}
+                - Range: {stats['min']:.2f} to {stats['max']:.2f}
+                - Outliers: {len(filtered_df[filtered_df[field] > (stats['75%'] + 1.5 * (stats['75%'] - stats['25%']))])} high outliers detected
+                """
+                
+            else:
+                # Categorical field - bar chart
+                value_counts = filtered_df[field].value_counts().head(10)
+                
+                fig = go.Figure(data=[
+                    go.Bar(x=value_counts.index, y=value_counts.values,
+                          marker_color='rgba(102, 126, 234, 0.7)')
+                ])
+                
+                fig.update_layout(
+                    title=f'{field} Distribution (Top 10)',
+                    template='plotly_dark',
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)',
+                    height=400,
+                    xaxis_title=field,
+                    yaxis_title='Count'
+                )
+                
+                # Generate insights
+                total_unique = filtered_df[field].nunique()
+                most_common = value_counts.index[0]
+                most_common_pct = (value_counts.iloc[0] / len(filtered_df)) * 100
+                
+                insight = f"""
+                **{field} Insights:**
+                - Total unique values: {total_unique}
+                - Most common: {most_common} ({most_common_pct:.1f}% of data)
+                - Distribution: {'Highly concentrated' if most_common_pct > 50 else 'Well distributed'}
+                - Coverage: {(filtered_df[field].notna().sum() / len(filtered_df)) * 100:.1f}% non-null values
+                """
+            
+            charts.append(fig)
+            insights.append(insight)
+        
+        return charts, insights
     def calculate_similarity(self, str1, str2):
         """Calculate similarity between two strings"""
         str1, str2 = str1.lower(), str2.lower()
@@ -689,6 +840,256 @@ def main():
                     st.session_state.current_step = 'mapping'
                     st.rerun()
     
+    # Claims Data Summary with Dashboard
+    elif st.session_state.current_step == 'claims-summary':
+        st.markdown("## 📊 Claims Data Summary Dashboard")
+        
+        if st.button("← Back to Dashboard"):
+            st.session_state.current_step = 'dashboard'
+            st.rerun()
+        
+        df = st.session_state.uploaded_data
+        
+        # Sidebar for dashboard controls
+        with st.sidebar:
+            st.markdown("### 🎛️ Dashboard Controls")
+            
+            # Field selection
+            available_fields = df.columns.tolist()
+            selected_fields = st.multiselect(
+                "Select Fields to Analyze",
+                available_fields,
+                default=available_fields[:5] if len(available_fields) >= 5 else available_fields,
+                help="Choose fields for detailed analysis"
+            )
+            
+            # Date range filter
+            if 'Treatment from date' in df.columns:
+                st.markdown("### 📅 Date Range")
+                try:
+                    df['Treatment from date'] = pd.to_datetime(df['Treatment from date'], errors='coerce')
+                    min_date = df['Treatment from date'].min()
+                    max_date = df['Treatment from date'].max()
+                    
+                    date_range = st.date_input(
+                        "Select Date Range",
+                        value=(min_date, max_date),
+                        min_value=min_date,
+                        max_value=max_date
+                    )
+                except:
+                    date_range = None
+            else:
+                date_range = None
+            
+            # Version filter
+            if 'Claim_version' in df.columns:
+                st.markdown("### 🔢 Claim Versions")
+                available_versions = sorted(df['Claim_version'].dropna().unique())
+                selected_versions = st.multiselect(
+                    "Select Versions",
+                    available_versions,
+                    default=available_versions,
+                    help="Filter by claim versions"
+                )
+            else:
+                selected_versions = None
+            
+            # Analysis type
+            st.markdown("### 📈 Analysis Type")
+            analysis_type = st.selectbox(
+                "Choose Analysis",
+                ["Overview", "Monthly Trends", "Version Analysis", "Field Deep Dive"]
+            )
+        
+        # Main dashboard content
+        if analysis_type == "Overview":
+            # Key metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total Claims", f"{len(df):,}")
+            
+            with col2:
+                if 'Paid amount' in df.columns:
+                    total_amount = df['Paid amount'].sum()
+                    st.metric("Total Amount", f"${total_amount:,.2f}")
+                else:
+                    st.metric("Total Columns", len(df.columns))
+            
+            with col3:
+                if 'Provider ID' in df.columns:
+                    unique_providers = df['Provider ID'].nunique()
+                    st.metric("Unique Providers", f"{unique_providers:,}")
+                else:
+                    st.metric("Data Quality", f"{((df.notna().sum().sum() / (len(df) * len(df.columns))) * 100):.1f}%")
+            
+            with col4:
+                if 'Member ID' in df.columns:
+                    unique_members = df['Member ID'].nunique()
+                    st.metric("Unique Members", f"{unique_members:,}")
+                else:
+                    st.metric("Completeness", f"{(df.dropna().shape[0] / len(df) * 100):.1f}%")
+            
+            # Charts for selected fields
+            if selected_fields:
+                charts, insights = analytics.create_dashboard_charts(
+                    df, selected_fields, date_range, selected_versions
+                )
+                
+                for i, (chart, insight) in enumerate(zip(charts, insights)):
+                    col1, col2 = st.columns([2, 1])
+                    
+                    with col1:
+                        st.plotly_chart(chart, use_container_width=True)
+                    
+                    with col2:
+                        st.markdown(insight)
+        
+        elif analysis_type == "Monthly Trends":
+            if 'Treatment from date' in df.columns:
+                try:
+                    df['Treatment from date'] = pd.to_datetime(df['Treatment from date'], errors='coerce')
+                    df['Year_Month'] = df['Treatment from date'].dt.to_period('M')
+                    
+                    monthly_claims = df.groupby('Year_Month').size().reset_index(name='Claims_Count')
+                    monthly_claims['Year_Month_str'] = monthly_claims['Year_Month'].astype(str)
+                    
+                    fig = px.line(
+                        monthly_claims, 
+                        x='Year_Month_str', 
+                        y='Claims_Count',
+                        title='Claims per Month',
+                        template='plotly_dark'
+                    )
+                    fig.update_layout(
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Monthly insights
+                    peak_month = monthly_claims.loc[monthly_claims['Claims_Count'].idxmax(), 'Year_Month_str']
+                    avg_monthly = monthly_claims['Claims_Count'].mean()
+                    
+                    st.markdown(f"""
+                    **Monthly Trends Insights:**
+                    - Peak month: {peak_month} with {monthly_claims['Claims_Count'].max():,} claims
+                    - Average monthly claims: {avg_monthly:.0f}
+                    - Trend: {'Increasing' if monthly_claims['Claims_Count'].iloc[-1] > avg_monthly else 'Stable/Decreasing'}
+                    """)
+                    
+                except Exception as e:
+                    st.error(f"Error creating monthly trends: {str(e)}")
+            else:
+                st.warning("Treatment from date field not available for monthly analysis")
+        
+        elif analysis_type == "Version Analysis":
+            if 'Claim_version' in df.columns:
+                version_counts = df['Claim_version'].value_counts().reset_index()
+                version_counts.columns = ['Version', 'Count']
+                
+                fig = px.bar(
+                    version_counts.head(10),
+                    x='Version',
+                    y='Count',
+                    title='Claim Versions Distribution',
+                    template='plotly_dark'
+                )
+                fig.update_layout(
+                    paper_bgcolor='rgba(0,0,0,0)',
+                    plot_bgcolor='rgba(0,0,0,0)'
+                )
+                
+                st.plotly_chart(fig, use_container_width=True)
+                
+                # Version insights
+                total_versions = df['Claim_version'].nunique()
+                most_common_version = version_counts.iloc[0]['Version']
+                most_common_pct = (version_counts.iloc[0]['Count'] / len(df)) * 100
+                
+                st.markdown(f"""
+                **Version Analysis Insights:**
+                - Total unique versions: {total_versions}
+                - Most common version: {most_common_version} ({most_common_pct:.1f}% of claims)
+                - Version distribution: {'Concentrated' if most_common_pct > 50 else 'Distributed'}
+                """)
+            else:
+                st.warning("Claim_version field not available for version analysis")
+        
+        elif analysis_type == "Field Deep Dive":
+            if selected_fields:
+                field_to_analyze = st.selectbox("Select Field for Deep Analysis", selected_fields)
+                
+                if field_to_analyze in df.columns:
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        # Basic statistics
+                        st.markdown(f"### {field_to_analyze} Statistics")
+                        
+                        if pd.api.types.is_numeric_dtype(df[field_to_analyze]):
+                            stats = df[field_to_analyze].describe()
+                            for stat, value in stats.items():
+                                st.metric(stat.title(), f"{value:.2f}")
+                        else:
+                            st.metric("Unique Values", df[field_to_analyze].nunique())
+                            st.metric("Most Common", df[field_to_analyze].mode().iloc[0] if not df[field_to_analyze].mode().empty else "N/A")
+                            st.metric("Null Values", df[field_to_analyze].isnull().sum())
+                    
+                    with col2:
+                        # Visualization
+                        if pd.api.types.is_numeric_dtype(df[field_to_analyze]):
+                            fig = px.histogram(
+                                df, 
+                                x=field_to_analyze,
+                                title=f'{field_to_analyze} Distribution',
+                                template='plotly_dark'
+                            )
+                        else:
+                            value_counts = df[field_to_analyze].value_counts().head(10)
+                            fig = px.bar(
+                                x=value_counts.index,
+                                y=value_counts.values,
+                                title=f'{field_to_analyze} Top 10 Values',
+                                template='plotly_dark'
+                            )
+                        
+                        fig.update_layout(
+                            paper_bgcolor='rgba(0,0,0,0)',
+                            plot_bgcolor='rgba(0,0,0,0)'
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Advanced insights
+                    st.markdown(f"### {field_to_analyze} Advanced Insights")
+                    
+                    if pd.api.types.is_numeric_dtype(df[field_to_analyze]):
+                        # Outlier analysis
+                        Q1 = df[field_to_analyze].quantile(0.25)
+                        Q3 = df[field_to_analyze].quantile(0.75)
+                        IQR = Q3 - Q1
+                        outliers = df[(df[field_to_analyze] < (Q1 - 1.5 * IQR)) | (df[field_to_analyze] > (Q3 + 1.5 * IQR))]
+                        
+                        st.markdown(f"""
+                        **Outlier Analysis:**
+                        - Total outliers: {len(outliers)} ({(len(outliers)/len(df)*100):.1f}% of data)
+                        - Lower bound: {Q1 - 1.5 * IQR:.2f}
+                        - Upper bound: {Q3 + 1.5 * IQR:.2f}
+                        - Recommendation: {'Review high-value claims' if len(outliers) > 0 else 'Data appears normal'}
+                        """)
+                    else:
+                        # Categorical analysis
+                        value_counts = df[field_to_analyze].value_counts()
+                        concentration = (value_counts.iloc[0] / len(df)) * 100 if len(value_counts) > 0 else 0
+                        
+                        st.markdown(f"""
+                        **Categorical Analysis:**
+                        - Data concentration: {concentration:.1f}% in top category
+                        - Distribution quality: {'Poor - highly concentrated' if concentration > 70 else 'Good - well distributed' if concentration < 30 else 'Moderate concentration'}
+                        - Recommendation: {'Consider data quality review' if concentration > 80 else 'Distribution appears healthy'}
+                        """)
     # Field Mapping Page - Compact Layout
     elif st.session_state.current_step == 'mapping':
         st.markdown('<div class="main-container">', unsafe_allow_html=True)
@@ -1087,7 +1488,179 @@ def main():
             if st.button("🏠 Back to Dashboard"):
                 st.session_state.current_step = 'dashboard'
                 st.rerun()
+def create_fwa_excel_report(df, results):
+    """Create Excel report with flagged claims only"""
+    try:
+        # Filter to only flagged claims
+        flagged_claim_ids = list(results['flagged_claims'])
         
+        if not flagged_claim_ids:
+            st.warning("No claims were flagged by any scenario.")
+            return
+        
+        # Filter dataframe to only flagged claims
+        if 'Claim ID' in df.columns:
+            flagged_df = df[df['Claim ID'].isin(flagged_claim_ids)].copy()
+        else:
+            st.error("Claim ID column not found in data")
+            return
+        
+        # Create binary flags for each scenario
+        python_flags = {}
+        ml_flags = {}
+        
+        # Python scenario flags
+        for scenario_name, result_df in results['python_results'].items():
+            if not result_df.empty and 'Claim ID' in result_df.columns:
+                flagged_ids = result_df['Claim ID'].tolist()
+                python_flags[f"Python_{scenario_name.replace(' ', '_')}"] = flagged_df['Claim ID'].isin(flagged_ids).astype(int)
+            else:
+                python_flags[f"Python_{scenario_name.replace(' ', '_')}"] = 0
+        
+        # ML scenario flags
+        for scenario_name, result_df in results['ml_results'].items():
+            if not result_df.empty and 'Claim ID' in result_df.columns:
+                flagged_ids = result_df['Claim ID'].tolist()
+                ml_flags[f"ML_{scenario_name.replace(' ', '_')}"] = flagged_df['Claim ID'].isin(flagged_ids).astype(int)
+            else:
+                ml_flags[f"ML_{scenario_name.replace(' ', '_')}"] = 0
+        
+        # Calculate fraud scores
+        python_score = sum(python_flags.values()) if python_flags else 0
+        ml_score = sum(ml_flags.values()) if ml_flags else 0
+        
+        if isinstance(python_score, pd.Series):
+            total_score = python_score + ml_score
+        else:
+            total_score = python_score + ml_score
+        
+        # Create Excel file
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            # Hypothesis sheet (Python scenarios)
+            if python_flags:
+                hypothesis_df = flagged_df.copy()
+                for flag_name, flag_values in python_flags.items():
+                    hypothesis_df[flag_name] = flag_values
+                
+                if isinstance(python_score, pd.Series):
+                    hypothesis_df['Fraud_Score'] = python_score
+                    hypothesis_df = hypothesis_df.sort_values('Fraud_Score', ascending=False)
+                
+                hypothesis_df.to_excel(writer, sheet_name='Hypothesis', index=False)
+            
+            # ML Scenarios sheet
+            if ml_flags:
+                ml_df = flagged_df.copy()
+                for flag_name, flag_values in ml_flags.items():
+                    ml_df[flag_name] = flag_values
+                
+                # Add ML reasoning
+                ml_df['ML_Reasoning'] = 'Flagged by machine learning algorithms based on anomalous patterns in claim data'
+                
+                if isinstance(ml_score, pd.Series):
+                    ml_df['ML_Fraud_Score'] = ml_score
+                    ml_df = ml_df.sort_values('ML_Fraud_Score', ascending=False)
+                
+                ml_df.to_excel(writer, sheet_name='ML_Scenarios', index=False)
+        
+        output.seek(0)
+        
+        # Offer download
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"FWA_Analysis_Results_{timestamp}.xlsx"
+        
+        st.download_button(
+            label="📥 Download FWA Analysis Report",
+            data=output.getvalue(),
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        st.success(f"✅ Report ready for download! {len(flagged_df)} flagged claims included.")
+        
+    except Exception as e:
+        st.error(f"Error creating Excel report: {str(e)}")
+        
+def show_fwa_recommendations():
+    """Show FWA prevention recommendations based on analysis results"""
+    if 'fwa_results' not in st.session_state:
+        st.error("No FWA analysis results available. Please run analysis first.")
+        return
+    
+    results = st.session_state.fwa_results
+    total_flagged = len(results['flagged_claims'])
+    total_scenarios = results['total_scenarios']
+    
+    st.markdown("## 💡 FWA Prevention Recommendations")
+    
+    # Risk assessment
+    risk_level = "High" if total_flagged > 100 else "Medium" if total_flagged > 50 else "Low"
+    risk_color = "🔴" if risk_level == "High" else "🟡" if risk_level == "Medium" else "🟢"
+    
+    st.markdown(f"""
+    ### {risk_color} Risk Assessment: {risk_level}
+    
+    **Analysis Summary:**
+    - Total scenarios run: {total_scenarios}
+    - Unique claims flagged: {total_flagged}
+    - Risk level: {risk_level}
+    """)
+    
+    # Recommendations based on results
+    recommendations = []
+    
+    if total_flagged > 0:
+        recommendations.extend([
+            "🔍 **Enhanced Monitoring**: Implement real-time monitoring for the flagged claim patterns",
+            "📊 **Regular Audits**: Conduct monthly audits focusing on high-risk providers and claim types",
+            "🤖 **Automated Screening**: Deploy automated pre-payment screening using the identified patterns",
+            "👥 **Staff Training**: Train claims processing staff on the detected fraud indicators"
+        ])
+    
+    if len(results['python_results']) > 0:
+        recommendations.extend([
+            "📋 **Rule-Based Controls**: Implement business rules based on Python scenario findings",
+            "⚠️ **Alert System**: Set up alerts for claims matching the identified suspicious patterns"
+        ])
+    
+    if len(results['ml_results']) > 0:
+        recommendations.extend([
+            "🧠 **ML Integration**: Integrate machine learning models into the claims processing workflow",
+            "📈 **Continuous Learning**: Regularly retrain ML models with new data to improve accuracy"
+        ])
+    
+    # General recommendations
+    recommendations.extend([
+        "🔐 **Access Controls**: Strengthen access controls and audit trails for claims processing",
+        "📞 **Whistleblower Program**: Establish anonymous reporting channels for suspected fraud",
+        "🤝 **Industry Collaboration**: Share fraud patterns with industry partners and regulatory bodies",
+        "📚 **Documentation**: Maintain detailed documentation of all fraud detection activities"
+    ])
+    
+    # Display recommendations
+    for i, rec in enumerate(recommendations, 1):
+        st.markdown(f"{i}. {rec}")
+    
+    # Implementation timeline
+    st.markdown("""
+    ### 📅 Suggested Implementation Timeline
+    
+    **Immediate (0-30 days):**
+    - Review and investigate all flagged claims
+    - Implement basic rule-based alerts
+    - Train staff on new fraud indicators
+    
+    **Short-term (1-3 months):**
+    - Deploy automated screening systems
+    - Establish regular audit procedures
+    - Enhance monitoring capabilities
+    
+    **Long-term (3-12 months):**
+    - Integrate ML models into production
+    - Develop comprehensive fraud prevention program
+    - Establish industry partnerships
+    """)
         if st.session_state.uploaded_data is not None:
             df = st.session_state.uploaded_data
             
@@ -1226,5 +1799,65 @@ def main():
         
         st.markdown('</div>', unsafe_allow_html=True)
 
+def run_fwa_analysis(df, selected_python, selected_ml, analytics):
+    """Run FWA analysis with proper error handling"""
+    try:
+        with st.spinner("Running FWA Analysis..."):
+            results = {
+                'python_results': {},
+                'ml_results': {},
+                'flagged_claims': set(),
+                'total_scenarios': len(selected_python) + len(selected_ml)
+            }
+            
+            # Run Python scenarios
+            if selected_python:
+                st.info("Running Python-based scenarios...")
+                for scenario_name in selected_python:
+                    try:
+                        result = analytics.python_scenarios.run_scenario(scenario_name, df)
+                        if not result.empty:
+                            results['python_results'][scenario_name] = result
+                            # Add flagged claim IDs to set
+                            if 'Claim ID' in result.columns:
+                                results['flagged_claims'].update(result['Claim ID'].tolist())
+                        else:
+                            results['python_results'][scenario_name] = pd.DataFrame()
+                    except Exception as e:
+                        st.error(f"❌ Error in scenario '{scenario_name}': {str(e)}")
+                        st.error("🛑 Stopping all scenarios due to error!")
+                        return
+            
+            # Run ML scenarios with train/test split
+            if selected_ml:
+                st.info("Running ML-based scenarios with train/test validation...")
+                for scenario_name in selected_ml:
+                    try:
+                        result = analytics.ml_scenarios.run_scenario(scenario_name, df)
+                        if not result.empty:
+                            results['ml_results'][scenario_name] = result
+                            # Add flagged claim IDs to set
+                            if 'Claim ID' in result.columns:
+                                results['flagged_claims'].update(result['Claim ID'].tolist())
+                        else:
+                            results['ml_results'][scenario_name] = pd.DataFrame()
+                    except Exception as e:
+                        st.error(f"❌ Error in ML scenario '{scenario_name}': {str(e)}")
+                        st.error("🛑 Stopping all scenarios due to error!")
+                        return
+            
+            # Store results in session state
+            st.session_state.fwa_results = results
+            
+            # Show summary
+            total_flagged = len(results['flagged_claims'])
+            st.success(f"✅ Analysis completed! {total_flagged} unique claims flagged across all scenarios.")
+            
+            # Create and offer download
+            create_fwa_excel_report(df, results)
+            
+    except Exception as e:
+        st.error(f"❌ Critical error during FWA analysis: {str(e)}")
+        st.error("🛑 Analysis stopped!")
 if __name__ == "__main__":
     main()
