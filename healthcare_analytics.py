@@ -7,6 +7,10 @@ from plotly.subplots import make_subplots
 import io
 from datetime import datetime, timedelta
 import warnings
+import sqlite3
+import pymysql
+import psycopg2
+import pyodbc
 warnings.filterwarnings('ignore')
 
 # Import FWA scenarios module
@@ -221,6 +225,155 @@ def load_custom_css():
     </style>
     """, unsafe_allow_html=True)
 
+def init_user_database():
+    """Initialize SQLite database for user mappings"""
+    conn = sqlite3.connect('user_mappings.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS user_mappings (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id TEXT NOT NULL,
+            data_hash TEXT NOT NULL,
+            mapping_data TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_id, data_hash)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+def save_user_mapping(user_id, data_hash, mapping_data):
+    """Save user field mapping to database"""
+    try:
+        conn = sqlite3.connect('user_mappings.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            INSERT OR REPLACE INTO user_mappings (user_id, data_hash, mapping_data)
+            VALUES (?, ?, ?)
+        ''', (user_id, data_hash, json.dumps(mapping_data)))
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        st.error(f"Error saving mapping: {str(e)}")
+        return False
+
+def load_user_mapping(user_id, data_hash):
+    """Load user field mapping from database"""
+    try:
+        conn = sqlite3.connect('user_mappings.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT mapping_data FROM user_mappings 
+            WHERE user_id = ? AND data_hash = ?
+        ''', (user_id, data_hash))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        if result:
+            return json.loads(result[0])
+        return None
+    except Exception as e:
+        st.error(f"Error loading mapping: {str(e)}")
+        return None
+
+def get_user_mappings(user_id):
+    """Get all mappings for a user"""
+    try:
+        conn = sqlite3.connect('user_mappings.db')
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+            SELECT data_hash, created_at FROM user_mappings 
+            WHERE user_id = ? 
+            ORDER BY created_at DESC
+        ''', (user_id,))
+        
+        results = cursor.fetchall()
+        conn.close()
+        
+        return results
+    except Exception as e:
+        st.error(f"Error getting user mappings: {str(e)}")
+        return []
+
+def connect_to_database(db_config):
+    """Connect to various database types"""
+    try:
+        db_type = db_config['db_type'].lower()
+        
+        if db_type == 'postgresql':
+            conn = psycopg2.connect(
+                host=db_config['host'],
+                port=db_config['port'],
+                database=db_config['database'],
+                user=db_config['username'],
+                password=db_config['password']
+            )
+            
+        elif db_type == 'mysql':
+            conn = pymysql.connect(
+                host=db_config['host'],
+                port=int(db_config['port']),
+                database=db_config['database'],
+                user=db_config['username'],
+                password=db_config['password']
+            )
+            
+        elif db_type == 'sqlite':
+            conn = sqlite3.connect(db_config['database'])
+            
+        elif db_type == 'sqlserver':
+            conn_str = f"DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={db_config['host']},{db_config['port']};DATABASE={db_config['database']};UID={db_config['username']};PWD={db_config['password']}"
+            conn = pyodbc.connect(conn_str)
+            
+        else:
+            raise ValueError(f"Unsupported database type: {db_type}")
+            
+        return conn
+        
+    except Exception as e:
+        raise Exception(f"Database connection failed: {str(e)}")
+
+def load_data_from_database(db_config, query=None, table_name=None):
+    """Load data from database"""
+    try:
+        conn = connect_to_database(db_config)
+        
+        if query:
+            df = pd.read_sql_query(query, conn)
+        elif table_name:
+            df = pd.read_sql_query(f"SELECT * FROM {table_name} LIMIT 1000", conn)
+        else:
+            # Get first table if no query or table specified
+            if db_config['db_type'].lower() == 'postgresql':
+                tables_query = "SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' LIMIT 1"
+            elif db_config['db_type'].lower() == 'mysql':
+                tables_query = f"SELECT table_name FROM information_schema.tables WHERE table_schema = '{db_config['database']}' LIMIT 1"
+            elif db_config['db_type'].lower() == 'sqlite':
+                tables_query = "SELECT name FROM sqlite_master WHERE type='table' LIMIT 1"
+            else:
+                tables_query = "SELECT TOP 1 TABLE_NAME FROM INFORMATION_SCHEMA.TABLES"
+                
+            table_df = pd.read_sql_query(tables_query, conn)
+            if not table_df.empty:
+                first_table = table_df.iloc[0, 0]
+                df = pd.read_sql_query(f"SELECT * FROM {first_table} LIMIT 1000", conn)
+            else:
+                raise Exception("No tables found in database")
+        
+        conn.close()
+        return df
+        
+    except Exception as e:
+        raise Exception(f"Error loading data from database: {str(e)}")
+
 # Function to save field mappings
 def save_field_mapping(data_columns, field_mappings):
     """Save field mappings based on data structure hash"""
@@ -267,8 +420,12 @@ def load_field_mapping(data_columns):
         pass  # Ignore file load errors
     
     return None
+
 class HealthcareAnalytics:
     def __init__(self):
+        # Initialize user database
+        init_user_database()
+        
         # Updated field list with new fields
         self.required_fields = [
             "Claim ID", "Member ID", "Provider ID", "Provider type", "Claim invoice_no",
@@ -771,6 +928,10 @@ def main():
         st.session_state.mapping_confirmed = False
     if 'fwa_results' not in st.session_state:
         st.session_state.fwa_results = None
+    if 'current_user' not in st.session_state:
+        st.session_state.current_user = 'User 1'
+    if 'data_hash' not in st.session_state:
+        st.session_state.data_hash = None
     
     analytics = HealthcareAnalytics()
     
@@ -1174,6 +1335,10 @@ def main():
             col1, col2 = st.columns(2)
             with col1:
                 if st.button("✅ Confirm Mapping", type="primary", use_container_width=True):
+                    # Save mapping for current user
+                    if save_user_mapping(st.session_state.current_user, st.session_state.data_hash, st.session_state.field_mappings):
+                        st.success(f"💾 Field mapping saved for {st.session_state.current_user}!")
+                    
                     st.session_state.mapping_confirmed = True
                     st.session_state.current_step = 'dashboard'
                     st.success("Field mapping confirmed!")
@@ -1183,6 +1348,11 @@ def main():
                 if st.button("✅ Confirm All Fields", use_container_width=True):
                     for mapping in st.session_state.field_mappings:
                         mapping['is_confirm'] = True
+                    
+                    # Save mapping for current user
+                    if save_user_mapping(st.session_state.current_user, st.session_state.data_hash, st.session_state.field_mappings):
+                        st.success(f"💾 Field mapping saved for {st.session_state.current_user}!")
+                    
                     st.session_state.mapping_confirmed = True
                     st.session_state.current_step = 'dashboard'
                     st.success("All fields confirmed!")
@@ -1488,179 +1658,7 @@ def main():
             if st.button("🏠 Back to Dashboard"):
                 st.session_state.current_step = 'dashboard'
                 st.rerun()
-def create_fwa_excel_report(df, results):
-    """Create Excel report with flagged claims only"""
-    try:
-        # Filter to only flagged claims
-        flagged_claim_ids = list(results['flagged_claims'])
-        
-        if not flagged_claim_ids:
-            st.warning("No claims were flagged by any scenario.")
-            return
-        
-        # Filter dataframe to only flagged claims
-        if 'Claim ID' in df.columns:
-            flagged_df = df[df['Claim ID'].isin(flagged_claim_ids)].copy()
-        else:
-            st.error("Claim ID column not found in data")
-            return
-        
-        # Create binary flags for each scenario
-        python_flags = {}
-        ml_flags = {}
-        
-        # Python scenario flags
-        for scenario_name, result_df in results['python_results'].items():
-            if not result_df.empty and 'Claim ID' in result_df.columns:
-                flagged_ids = result_df['Claim ID'].tolist()
-                python_flags[f"Python_{scenario_name.replace(' ', '_')}"] = flagged_df['Claim ID'].isin(flagged_ids).astype(int)
-            else:
-                python_flags[f"Python_{scenario_name.replace(' ', '_')}"] = 0
-        
-        # ML scenario flags
-        for scenario_name, result_df in results['ml_results'].items():
-            if not result_df.empty and 'Claim ID' in result_df.columns:
-                flagged_ids = result_df['Claim ID'].tolist()
-                ml_flags[f"ML_{scenario_name.replace(' ', '_')}"] = flagged_df['Claim ID'].isin(flagged_ids).astype(int)
-            else:
-                ml_flags[f"ML_{scenario_name.replace(' ', '_')}"] = 0
-        
-        # Calculate fraud scores
-        python_score = sum(python_flags.values()) if python_flags else 0
-        ml_score = sum(ml_flags.values()) if ml_flags else 0
-        
-        if isinstance(python_score, pd.Series):
-            total_score = python_score + ml_score
-        else:
-            total_score = python_score + ml_score
-        
-        # Create Excel file
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            # Hypothesis sheet (Python scenarios)
-            if python_flags:
-                hypothesis_df = flagged_df.copy()
-                for flag_name, flag_values in python_flags.items():
-                    hypothesis_df[flag_name] = flag_values
-                
-                if isinstance(python_score, pd.Series):
-                    hypothesis_df['Fraud_Score'] = python_score
-                    hypothesis_df = hypothesis_df.sort_values('Fraud_Score', ascending=False)
-                
-                hypothesis_df.to_excel(writer, sheet_name='Hypothesis', index=False)
-            
-            # ML Scenarios sheet
-            if ml_flags:
-                ml_df = flagged_df.copy()
-                for flag_name, flag_values in ml_flags.items():
-                    ml_df[flag_name] = flag_values
-                
-                # Add ML reasoning
-                ml_df['ML_Reasoning'] = 'Flagged by machine learning algorithms based on anomalous patterns in claim data'
-                
-                if isinstance(ml_score, pd.Series):
-                    ml_df['ML_Fraud_Score'] = ml_score
-                    ml_df = ml_df.sort_values('ML_Fraud_Score', ascending=False)
-                
-                ml_df.to_excel(writer, sheet_name='ML_Scenarios', index=False)
-        
-        output.seek(0)
-        
-        # Offer download
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"FWA_Analysis_Results_{timestamp}.xlsx"
-        
-        st.download_button(
-            label="📥 Download FWA Analysis Report",
-            data=output.getvalue(),
-            file_name=filename,
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-        
-        st.success(f"✅ Report ready for download! {len(flagged_df)} flagged claims included.")
-        
-    except Exception as e:
-        st.error(f"Error creating Excel report: {str(e)}")
-        
-def show_fwa_recommendations():
-    """Show FWA prevention recommendations based on analysis results"""
-    if 'fwa_results' not in st.session_state:
-        st.error("No FWA analysis results available. Please run analysis first.")
-        return
-    
-    results = st.session_state.fwa_results
-    total_flagged = len(results['flagged_claims'])
-    total_scenarios = results['total_scenarios']
-    
-    st.markdown("## 💡 FWA Prevention Recommendations")
-    
-    # Risk assessment
-    risk_level = "High" if total_flagged > 100 else "Medium" if total_flagged > 50 else "Low"
-    risk_color = "🔴" if risk_level == "High" else "🟡" if risk_level == "Medium" else "🟢"
-    
-    st.markdown(f"""
-    ### {risk_color} Risk Assessment: {risk_level}
-    
-    **Analysis Summary:**
-    - Total scenarios run: {total_scenarios}
-    - Unique claims flagged: {total_flagged}
-    - Risk level: {risk_level}
-    """)
-    
-    # Recommendations based on results
-    recommendations = []
-    
-    if total_flagged > 0:
-        recommendations.extend([
-            "🔍 **Enhanced Monitoring**: Implement real-time monitoring for the flagged claim patterns",
-            "📊 **Regular Audits**: Conduct monthly audits focusing on high-risk providers and claim types",
-            "🤖 **Automated Screening**: Deploy automated pre-payment screening using the identified patterns",
-            "👥 **Staff Training**: Train claims processing staff on the detected fraud indicators"
-        ])
-    
-    if len(results['python_results']) > 0:
-        recommendations.extend([
-            "📋 **Rule-Based Controls**: Implement business rules based on Python scenario findings",
-            "⚠️ **Alert System**: Set up alerts for claims matching the identified suspicious patterns"
-        ])
-    
-    if len(results['ml_results']) > 0:
-        recommendations.extend([
-            "🧠 **ML Integration**: Integrate machine learning models into the claims processing workflow",
-            "📈 **Continuous Learning**: Regularly retrain ML models with new data to improve accuracy"
-        ])
-    
-    # General recommendations
-    recommendations.extend([
-        "🔐 **Access Controls**: Strengthen access controls and audit trails for claims processing",
-        "📞 **Whistleblower Program**: Establish anonymous reporting channels for suspected fraud",
-        "🤝 **Industry Collaboration**: Share fraud patterns with industry partners and regulatory bodies",
-        "📚 **Documentation**: Maintain detailed documentation of all fraud detection activities"
-    ])
-    
-    # Display recommendations
-    for i, rec in enumerate(recommendations, 1):
-        st.markdown(f"{i}. {rec}")
-    
-    # Implementation timeline
-    st.markdown("""
-    ### 📅 Suggested Implementation Timeline
-    
-    **Immediate (0-30 days):**
-    - Review and investigate all flagged claims
-    - Implement basic rule-based alerts
-    - Train staff on new fraud indicators
-    
-    **Short-term (1-3 months):**
-    - Deploy automated screening systems
-    - Establish regular audit procedures
-    - Enhance monitoring capabilities
-    
-    **Long-term (3-12 months):**
-    - Integrate ML models into production
-    - Develop comprehensive fraud prevention program
-    - Establish industry partnerships
-    """)
+
         if st.session_state.uploaded_data is not None:
             df = st.session_state.uploaded_data
             
@@ -1859,5 +1857,180 @@ def run_fwa_analysis(df, selected_python, selected_ml, analytics):
     except Exception as e:
         st.error(f"❌ Critical error during FWA analysis: {str(e)}")
         st.error("🛑 Analysis stopped!")
+
+def create_fwa_excel_report(df, results):
+    """Create Excel report with flagged claims only"""
+    try:
+        # Filter to only flagged claims
+        flagged_claim_ids = list(results['flagged_claims'])
+        
+        if not flagged_claim_ids:
+            st.warning("No claims were flagged by any scenario.")
+            return
+        
+        # Filter dataframe to only flagged claims
+        if 'Claim ID' in df.columns:
+            flagged_df = df[df['Claim ID'].isin(flagged_claim_ids)].copy()
+        else:
+            st.error("Claim ID column not found in data")
+            return
+        
+        # Create binary flags for each scenario
+        python_flags = {}
+        ml_flags = {}
+        
+        # Python scenario flags
+        for scenario_name, result_df in results['python_results'].items():
+            if not result_df.empty and 'Claim ID' in result_df.columns:
+                flagged_ids = result_df['Claim ID'].tolist()
+                python_flags[f"Python_{scenario_name.replace(' ', '_')}"] = flagged_df['Claim ID'].isin(flagged_ids).astype(int)
+            else:
+                python_flags[f"Python_{scenario_name.replace(' ', '_')}"] = 0
+        
+        # ML scenario flags
+        for scenario_name, result_df in results['ml_results'].items():
+            if not result_df.empty and 'Claim ID' in result_df.columns:
+                flagged_ids = result_df['Claim ID'].tolist()
+                ml_flags[f"ML_{scenario_name.replace(' ', '_')}"] = flagged_df['Claim ID'].isin(flagged_ids).astype(int)
+            else:
+                ml_flags[f"ML_{scenario_name.replace(' ', '_')}"] = 0
+        
+        # Calculate fraud scores
+        python_score = sum(python_flags.values()) if python_flags else 0
+        ml_score = sum(ml_flags.values()) if ml_flags else 0
+        
+        if isinstance(python_score, pd.Series):
+            total_score = python_score + ml_score
+        else:
+            total_score = python_score + ml_score
+        
+        # Create Excel file
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            # Hypothesis sheet (Python scenarios)
+            if python_flags:
+                hypothesis_df = flagged_df.copy()
+                for flag_name, flag_values in python_flags.items():
+                    hypothesis_df[flag_name] = flag_values
+                
+                if isinstance(python_score, pd.Series):
+                    hypothesis_df['Fraud_Score'] = python_score
+                    hypothesis_df = hypothesis_df.sort_values('Fraud_Score', ascending=False)
+                
+                hypothesis_df.to_excel(writer, sheet_name='Hypothesis', index=False)
+            
+            # ML Scenarios sheet
+            if ml_flags:
+                ml_df = flagged_df.copy()
+                for flag_name, flag_values in ml_flags.items():
+                    ml_df[flag_name] = flag_values
+                
+                # Add ML reasoning
+                ml_df['ML_Reasoning'] = 'Flagged by machine learning algorithms based on anomalous patterns in claim data'
+                
+                if isinstance(ml_score, pd.Series):
+                    ml_df['ML_Fraud_Score'] = ml_score
+                    ml_df = ml_df.sort_values('ML_Fraud_Score', ascending=False)
+                
+                ml_df.to_excel(writer, sheet_name='ML_Scenarios', index=False)
+        
+        output.seek(0)
+        
+        # Offer download
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"FWA_Analysis_Results_{timestamp}.xlsx"
+        
+        st.download_button(
+            label="📥 Download FWA Analysis Report",
+            data=output.getvalue(),
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        
+        st.success(f"✅ Report ready for download! {len(flagged_df)} flagged claims included.")
+        
+    except Exception as e:
+        st.error(f"Error creating Excel report: {str(e)}")
+        
+def show_fwa_recommendations():
+    """Show FWA prevention recommendations based on analysis results"""
+    if 'fwa_results' not in st.session_state:
+        st.error("No FWA analysis results available. Please run analysis first.")
+        return
+    
+    results = st.session_state.fwa_results
+    total_flagged = len(results['flagged_claims'])
+    total_scenarios = results['total_scenarios']
+    
+    st.markdown("## 💡 FWA Prevention Recommendations")
+    
+    # Risk assessment
+    risk_level = "High" if total_flagged > 100 else "Medium" if total_flagged > 50 else "Low"
+    risk_color = "🔴" if risk_level == "High" else "🟡" if risk_level == "Medium" else "🟢"
+    
+    st.markdown(f"""
+    ### {risk_color} Risk Assessment: {risk_level}
+    
+    **Analysis Summary:**
+    - Total scenarios run: {total_scenarios}
+    - Unique claims flagged: {total_flagged}
+    - Risk level: {risk_level}
+    """)
+    
+    # Recommendations based on results
+    recommendations = []
+    
+    if total_flagged > 0:
+        recommendations.extend([
+            "🔍 **Enhanced Monitoring**: Implement real-time monitoring for the flagged claim patterns",
+            "📊 **Regular Audits**: Conduct monthly audits focusing on high-risk providers and claim types",
+            "🤖 **Automated Screening**: Deploy automated pre-payment screening using the identified patterns",
+            "👥 **Staff Training**: Train claims processing staff on the detected fraud indicators"
+        ])
+    
+    if len(results['python_results']) > 0:
+        recommendations.extend([
+            "📋 **Rule-Based Controls**: Implement business rules based on Python scenario findings",
+            "⚠️ **Alert System**: Set up alerts for claims matching the identified suspicious patterns"
+        ])
+    
+    if len(results['ml_results']) > 0:
+        recommendations.extend([
+            "🧠 **ML Integration**: Integrate machine learning models into the claims processing workflow",
+            "📈 **Continuous Learning**: Regularly retrain ML models with new data to improve accuracy"
+        ])
+    
+    # General recommendations
+    recommendations.extend([
+        "🔐 **Access Controls**: Strengthen access controls and audit trails for claims processing",
+        "📞 **Whistleblower Program**: Establish anonymous reporting channels for suspected fraud",
+        "🤝 **Industry Collaboration**: Share fraud patterns with industry partners and regulatory bodies",
+        "📚 **Documentation**: Maintain detailed documentation of all fraud detection activities"
+    ])
+    
+    # Display recommendations
+    for i, rec in enumerate(recommendations, 1):
+        st.markdown(f"{i}. {rec}")
+    
+    # Implementation timeline
+    st.markdown("""
+    ### 📅 Suggested Implementation Timeline
+    
+    **Immediate (0-30 days):**
+    - Review and investigate all flagged claims
+    - Implement basic rule-based alerts
+    - Train staff on new fraud indicators
+    
+    **Short-term (1-3 months):**
+    - Deploy automated screening systems
+    - Establish regular audit procedures
+    - Enhance monitoring capabilities
+    
+    **Long-term (3-12 months):**
+    - Integrate ML models into production
+    - Develop comprehensive fraud prevention program
+    - Establish industry partnerships
+    """)
+
 if __name__ == "__main__":
     main()

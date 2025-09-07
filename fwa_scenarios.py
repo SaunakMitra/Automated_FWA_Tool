@@ -39,6 +39,9 @@ class PythonScenarios:
                 "required_fields": ["Member ID", "Invoice No Reference", "Claim ID", "Provider ID"],
                 "function": self.scenario_5_invalid_invoices
             },
+        
+        # Store validation results
+        self.validation_results = {}
             "Scenario 6 - Inpatient-Outpatient Same Day": {
                 "description": "Identifies same-day inpatient (0003) and outpatient (0004) treatments",
                 "required_fields": ["Member ID", "Treatment from date", "Treatment to date"],
@@ -683,3 +686,7 @@ class MLScenarios:
             
         except Exception as e:
             raise Exception(f"LightGBM failed: {str(e)}")
+    
+    def get_validation_summary(self):
+        """Get summary of all validation results"""
+        return self.validation_results
