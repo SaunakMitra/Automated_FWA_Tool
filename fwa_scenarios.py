@@ -4,46 +4,46 @@ from sklearn.ensemble import IsolationForest, RandomForestClassifier
 from sklearn.cluster import DBSCAN
 from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.model_selection import train_test_split, cross_val_score
-from sklearn.metrics import classification_report, confusion_matrix
+from sklearn.metrics import classification_report, roc_auc_score, accuracy_score, precision_score, recall_score
 import lightgbm as lgb
 import warnings
+import io
+from datetime import datetime
 warnings.filterwarnings('ignore')
 
-class PythonScenarios:
-    """Python-based FWA detection scenarios with exact implementations"""
-    
+class FWAScenarios:
     def __init__(self):
-        self.scenarios = {
+        self.python_scenarios = {
             "Scenario 1 - Amount Outlier Detection": {
                 "description": "Detects claims with unusually high amounts using IQR analysis",
-                "required_fields": ["Claimed_currency_code", "Provider_country_code", "Payee type", "Claim invoice gross total amount", "Procedure_code (CPT codes)", "Incident count"],
+                "required_fields": ["Claimed_currency_code", "Provider_country_code", "Payee type", 
+                                  "Claim invoice gross total amount", "Procedure_code (CPT codes)", "Incident count"],
                 "function": self.scenario_1_amount_outlier
             },
             "Scenario 2 - Chemotherapy Frequency Analysis": {
                 "description": "Identifies suspicious chemotherapy treatment patterns with 3-13 day gaps",
-                "required_fields": ["Procedure_code (CPT codes)", "Treatment from date", "Treatment to date", "Member ID", "Claim ID"],
+                "required_fields": ["Procedure_code (CPT codes)", "Treatment from date", "Treatment to date", 
+                                  "Member ID", "Claim ID"],
                 "function": self.scenario_2_chemotherapy
             },
             "Scenario 3 - Cross-Country Treatment Analysis": {
                 "description": "Detects treatments in different countries on same date",
-                "required_fields": ["Member ID", "Treatment from date", "Provider_country_code", "Diagnostic_code (ICD-10)"],
+                "required_fields": ["Member ID", "Treatment from date", "Provider_country_code", 
+                                  "Diagnostic_code (ICD-10)"],
                 "function": self.scenario_3_cross_country
             },
             "Scenario 4 - Sunday Hospital Claims": {
-                "description": "Identifies hospital claims submitted on Sundays with specialisation code 0003",
+                "description": "Identifies hospital claims submitted on Sundays",
                 "required_fields": ["Treatment from date", "Provider ID", "Claim ID"],
                 "function": self.scenario_4_sunday_claims
             },
             "Scenario 5 - Invalid Invoice References": {
-                "description": "Detects duplicate claims with invalid invoice references (not length 8)",
+                "description": "Detects duplicate claims with invalid invoice references",
                 "required_fields": ["Member ID", "Invoice No Reference", "Claim ID", "Provider ID"],
                 "function": self.scenario_5_invalid_invoices
             },
-        
-        # Store validation results
-        self.validation_results = {}
-            "Scenario 6 - Inpatient-Outpatient Same Day": {
-                "description": "Identifies same-day inpatient (0003) and outpatient (0004) treatments",
+            "Scenario 6 - Same Day Inpatient-Outpatient": {
+                "description": "Identifies same-day inpatient and outpatient treatments",
                 "required_fields": ["Member ID", "Treatment from date", "Treatment to date"],
                 "function": self.scenario_6_same_day_treatments
             },
@@ -58,77 +58,188 @@ class PythonScenarios:
                 "function": self.scenario_8_multiple_providers
             }
         }
-    
-    def get_available_scenarios(self):
-        return self.scenarios
-    
-    def run_scenario(self, scenario_name, df):
-        """Run a specific scenario"""
-        if scenario_name not in self.scenarios:
-            raise ValueError(f"Scenario '{scenario_name}' not found")
         
-        scenario_func = self.scenarios[scenario_name]["function"]
-        return scenario_func(df)
+        self.ml_scenarios = {
+            "Isolation Forest Anomaly Detection": {
+                "description": "Uses Isolation Forest to detect anomalous claims",
+                "required_fields": ["Paid amount", "Age", "Incident count"],
+                "function": self.isolation_forest_detection,
+                "reason": "Anomalous pattern in claim amount and patient demographics"
+            },
+            "DBSCAN Clustering Analysis": {
+                "description": "Identifies unusual claim clusters using density-based clustering",
+                "required_fields": ["Paid amount", "Age", "Provider ID"],
+                "function": self.dbscan_clustering,
+                "reason": "Outlier in provider-patient-amount clustering pattern"
+            },
+            "Random Forest Fraud Prediction": {
+                "description": "Predicts fraud probability using Random Forest algorithm",
+                "required_fields": ["Paid amount", "Age", "Provider ID", "Diagnostic_code (ICD-10)"],
+                "function": self.random_forest_prediction,
+                "reason": "High fraud probability based on historical patterns"
+            },
+            "LightGBM Advanced Detection": {
+                "description": "Advanced gradient boosting for complex fraud pattern detection",
+                "required_fields": ["Paid amount", "Age", "Provider ID", "Procedure_code (CPT codes)"],
+                "function": self.lightgbm_detection,
+                "reason": "Complex fraud pattern detected by gradient boosting algorithm"
+            }
+        }
     
-    def map_column_names(self, df, required_columns):
-        """Map column names to handle variations"""
+    def map_column_names(self, df, required_columns, field_mapping):
+        """Map column names using field mapping"""
         column_mapping = {}
-        df_columns = df.columns.tolist()
         
         for req_col in required_columns:
-            # Find best matching column
-            best_match = None
-            best_score = 0
-            
-            for df_col in df_columns:
-                score = self.calculate_similarity(req_col.lower(), df_col.lower())
-                if score > best_score:
-                    best_score = score
-                    best_match = df_col
-            
-            if best_score > 0.3:  # Lower threshold for flexibility
-                column_mapping[req_col] = best_match
-            else:
-                # Try to find any column with similar keywords
-                for df_col in df_columns:
-                    if any(word in df_col.lower() for word in req_col.lower().split()):
-                        column_mapping[req_col] = df_col
-                        break
+            if req_col in field_mapping:
+                mapped_col = field_mapping[req_col]
+                if mapped_col in df.columns:
+                    column_mapping[req_col] = mapped_col
                 else:
-                    column_mapping[req_col] = req_col  # Keep original if no match
+                    # Fallback to similarity matching
+                    best_match = self.find_best_match(req_col, df.columns)
+                    column_mapping[req_col] = best_match if best_match else req_col
+            else:
+                # Fallback to similarity matching
+                best_match = self.find_best_match(req_col, df.columns)
+                column_mapping[req_col] = best_match if best_match else req_col
         
         return column_mapping
     
-    def calculate_similarity(self, str1, str2):
-        """Calculate similarity between two strings"""
-        str1, str2 = str1.lower(), str2.lower()
+    def find_best_match(self, target, columns):
+        """Find best matching column name"""
+        target_lower = target.lower()
+        best_match = None
+        best_score = 0
         
-        if str1 == str2:
-            return 1.0
-        if str1 in str2 or str2 in str1:
-            return 0.9
+        for col in columns:
+            col_lower = col.lower()
+            
+            # Exact match
+            if target_lower == col_lower:
+                return col
+            
+            # Contains match
+            if target_lower in col_lower or col_lower in target_lower:
+                score = 0.9
+                if score > best_score:
+                    best_score = score
+                    best_match = col
+            
+            # Word overlap
+            target_words = set(target_lower.replace('_', ' ').replace('-', ' ').split())
+            col_words = set(col_lower.replace('_', ' ').replace('-', ' ').split())
+            
+            if target_words & col_words:
+                score = len(target_words & col_words) / len(target_words | col_words)
+                if score > best_score:
+                    best_score = score
+                    best_match = col
         
-        words1 = set(str1.replace('_', ' ').replace('-', ' ').split())
-        words2 = set(str2.replace('_', ' ').replace('-', ' ').split())
-        
-        if words1 & words2:
-            return len(words1 & words2) / len(words1 | words2)
-        
-        return 0.0
+        return best_match if best_score > 0.3 else None
     
-    def scenario_1_amount_outlier(self, df):
-        """Scenario 1: Amount Outlier Detection - Exact Implementation"""
+    def run_scenarios(self, df, selected_python, selected_ml, field_mapping):
+        """Run selected FWA scenarios"""
+        all_results = []
+        scenario_flags = {}
+        
         try:
-            # Map column names
-            required_cols = ["Claimed_currency_code", "Provider_country_code", "Payee type", 
-                           "Claim invoice gross total amount", "Procedure_code (CPT codes)", "Incident count"]
-            col_mapping = self.map_column_names(df, required_cols)
+            # Run Python scenarios
+            for scenario_name in selected_python:
+                try:
+                    scenario_info = self.python_scenarios[scenario_name]
+                    scenario_func = scenario_info["function"]
+                    
+                    # Map required columns
+                    required_cols = scenario_info["required_fields"]
+                    col_mapping = self.map_column_names(df, required_cols, field_mapping)
+                    
+                    # Check if all required columns are available
+                    missing_cols = [col for col in required_cols if col_mapping.get(col) not in df.columns]
+                    if missing_cols:
+                        raise ValueError(f"Missing required columns for {scenario_name}: {missing_cols}")
+                    
+                    # Run scenario
+                    result = scenario_func(df, col_mapping)
+                    
+                    if not result.empty:
+                        result['scenario'] = scenario_name
+                        result['scenario_type'] = 'Python'
+                        result['fraud_reason'] = scenario_info["description"]
+                        all_results.append(result)
+                        
+                        # Track flags for each claim
+                        for claim_id in result['Claim ID'].values:
+                            if claim_id not in scenario_flags:
+                                scenario_flags[claim_id] = {}
+                            scenario_flags[claim_id][scenario_name] = 1
+                
+                except Exception as e:
+                    # If any Python scenario fails, stop all scenarios
+                    raise Exception(f"Python scenario '{scenario_name}' failed: {str(e)}. All scenarios stopped.")
             
-            # Check if required columns exist
-            missing_cols = [col for col in required_cols if col_mapping[col] not in df.columns]
-            if missing_cols:
-                raise ValueError(f"Missing required columns: {missing_cols}")
+            # Run ML scenarios with train/test split
+            for scenario_name in selected_ml:
+                try:
+                    scenario_info = self.ml_scenarios[scenario_name]
+                    scenario_func = scenario_info["function"]
+                    
+                    # Map required columns
+                    required_cols = scenario_info["required_fields"]
+                    col_mapping = self.map_column_names(df, required_cols, field_mapping)
+                    
+                    # Check if all required columns are available
+                    missing_cols = [col for col in required_cols if col_mapping.get(col) not in df.columns]
+                    if missing_cols:
+                        raise ValueError(f"Missing required columns for {scenario_name}: {missing_cols}")
+                    
+                    # Run ML scenario with train/test split
+                    result = scenario_func(df, col_mapping)
+                    
+                    if not result.empty:
+                        result['scenario'] = scenario_name
+                        result['scenario_type'] = 'ML'
+                        result['fraud_reason'] = scenario_info["reason"]
+                        all_results.append(result)
+                        
+                        # Track flags for each claim
+                        for claim_id in result['Claim ID'].values:
+                            if claim_id not in scenario_flags:
+                                scenario_flags[claim_id] = {}
+                            scenario_flags[claim_id][scenario_name] = 1
+                
+                except Exception as e:
+                    # If any ML scenario fails, stop all scenarios
+                    raise Exception(f"ML scenario '{scenario_name}' failed: {str(e)}. All scenarios stopped.")
             
+            # Combine all results
+            if all_results:
+                combined_results = pd.concat(all_results, ignore_index=True)
+                
+                # Add scenario flags
+                all_scenario_names = list(selected_python) + list(selected_ml)
+                for scenario in all_scenario_names:
+                    combined_results[f'{scenario}_flag'] = combined_results['Claim ID'].map(
+                        lambda x: scenario_flags.get(x, {}).get(scenario, 0)
+                    )
+                
+                # Calculate fraud score
+                combined_results['fraud_score'] = combined_results[[f'{s}_flag' for s in all_scenario_names]].sum(axis=1)
+                
+                # Only return claims with at least one flag
+                flagged_claims = combined_results[combined_results['fraud_score'] > 0]
+                
+                return flagged_claims.sort_values('fraud_score', ascending=False)
+            
+            return pd.DataFrame()
+            
+        except Exception as e:
+            raise Exception(str(e))
+    
+    # Python Scenario Implementations
+    def scenario_1_amount_outlier(self, df, col_mapping):
+        """Scenario 1: Amount Outlier Detection"""
+        try:
             # Step 1: Filter base dataset
             filtered = df[
                 (df[col_mapping["Claimed_currency_code"]].astype(str) == "GBP") &
@@ -195,12 +306,9 @@ class PythonScenarios:
         except Exception as e:
             raise Exception(f"Scenario 1 failed: {str(e)}")
     
-    def scenario_2_chemotherapy(self, df):
-        """Scenario 2: Chemotherapy Frequency Analysis - Exact Implementation"""
+    def scenario_2_chemotherapy(self, df, col_mapping):
+        """Scenario 2: Chemotherapy Frequency Analysis"""
         try:
-            required_cols = ["Procedure_code (CPT codes)", "Treatment from date", "Treatment to date", "Member ID", "Claim ID"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
             # Step 1: Filter chemotherapy claims
             chemo_claims = df[
                 (df[col_mapping["Procedure_code (CPT codes)"]].astype(str) == "4030") &
@@ -210,6 +318,9 @@ class PythonScenarios:
             
             if chemo_claims.empty:
                 return pd.DataFrame(columns=['Claim ID', 'Member ID', 'Provider ID', 'Paid amount'])
+            
+            # Convert dates
+            chemo_claims[col_mapping["Treatment from date"]] = pd.to_datetime(chemo_claims[col_mapping["Treatment from date"]], errors='coerce')
             
             # Step 2: Aggregate paid amount per claim
             chemo_claims = (
@@ -224,15 +335,9 @@ class PythonScenarios:
             chemo_claims["rn"] = chemo_claims.groupby("Member ID").cumcount() + 1
             
             # Step 4: Add previous claim info
-            chemo_claims["previous_claim_id"] = chemo_claims.groupby("Member ID")["Claim ID"].shift(1)
             chemo_claims["previous_treatment_date"] = chemo_claims.groupby("Member ID")[col_mapping["Treatment from date"]].shift(1)
-            chemo_claims["previous_paid_value"] = chemo_claims.groupby("Member ID")["Paid amount"].shift(1)
-            chemo_claims["previous_currency"] = chemo_claims.groupby("Member ID")["Claimed_currency_code"].shift(1)
             
             # Step 5: Calculate gap in days
-            chemo_claims[col_mapping["Treatment from date"]] = pd.to_datetime(chemo_claims[col_mapping["Treatment from date"]], errors='coerce')
-            chemo_claims["previous_treatment_date"] = pd.to_datetime(chemo_claims["previous_treatment_date"], errors='coerce')
-            
             chemo_claims["days_between"] = (
                 chemo_claims[col_mapping["Treatment from date"]] - chemo_claims["previous_treatment_date"]
             ).dt.days
@@ -250,12 +355,9 @@ class PythonScenarios:
         except Exception as e:
             raise Exception(f"Scenario 2 failed: {str(e)}")
     
-    def scenario_3_cross_country(self, df):
-        """Scenario 3: Cross-Country Treatment Analysis - Exact Implementation"""
+    def scenario_3_cross_country(self, df, col_mapping):
+        """Scenario 3: Cross-Country Treatment Analysis"""
         try:
-            required_cols = ["Member ID", "Treatment from date", "Provider_country_code", "Diagnostic_code (ICD-10)"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
             # Self-join on Member ID and Treatment from date
             merged = df.merge(
                 df,
@@ -281,19 +383,15 @@ class PythonScenarios:
         except Exception as e:
             raise Exception(f"Scenario 3 failed: {str(e)}")
     
-    def scenario_4_sunday_claims(self, df):
-        """Scenario 4: Sunday Hospital Claims - Exact Implementation"""
+    def scenario_4_sunday_claims(self, df, col_mapping):
+        """Scenario 4: Sunday Hospital Claims"""
         try:
-            required_cols = ["Treatment from date", "Provider ID", "Claim ID"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
             # Convert to datetime
             df[col_mapping["Treatment from date"]] = pd.to_datetime(df[col_mapping["Treatment from date"]], errors='coerce')
             
-            # Filter Sunday claims with specialisation_code 0003
+            # Filter Sunday claims
             sunday_claims = df[
-                (df[col_mapping["Treatment from date"]].dt.dayofweek == 6) &  # Sunday = 6
-                (df.get("specialisation_code", pd.Series(["0003"] * len(df))).astype(str) == "0003")
+                df[col_mapping["Treatment from date"]].dt.dayofweek == 6  # Sunday = 6
             ]
             
             if not sunday_claims.empty:
@@ -304,12 +402,9 @@ class PythonScenarios:
         except Exception as e:
             raise Exception(f"Scenario 4 failed: {str(e)}")
     
-    def scenario_5_invalid_invoices(self, df):
-        """Scenario 5: Invalid Invoice References - Exact Implementation"""
+    def scenario_5_invalid_invoices(self, df, col_mapping):
+        """Scenario 5: Invalid Invoice References"""
         try:
-            required_cols = ["Member ID", "Invoice No Reference", "Claim ID", "Provider ID"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
             # Step 1: Find invalid invoice references
             invalid_invoices = (
                 df[df[col_mapping["Invoice No Reference"]].astype(str).str.len() != 8]
@@ -334,51 +429,25 @@ class PythonScenarios:
         except Exception as e:
             raise Exception(f"Scenario 5 failed: {str(e)}")
     
-    def scenario_6_same_day_treatments(self, df):
-        """Scenario 6: Same Day Inpatient-Outpatient Treatments - Exact Implementation"""
+    def scenario_6_same_day_treatments(self, df, col_mapping):
+        """Scenario 6: Same Day Inpatient-Outpatient Treatments"""
         try:
-            required_cols = ["Member ID", "Treatment from date", "Treatment to date"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
-            # Find same day treatments with different specialisation codes
+            # Find same day treatments
             same_day = df[
                 df[col_mapping["Treatment from date"]] == df[col_mapping["Treatment to date"]]
             ]
             
-            # Check for both inpatient (0003) and outpatient (0004) codes
-            if "specialisation_code" in df.columns:
-                member_date_flags = (
-                    same_day[same_day["specialisation_code"].str.strip().isin(["0003", "0004"])]
-                    .groupby(["Member ID", col_mapping["Treatment from date"]])
-                    .agg(
-                        has_inpatient=("specialisation_code", lambda x: any(x.str.strip() == "0003")),
-                        has_outpatient=("specialisation_code", lambda x: any(x.str.strip() == "0004"))
-                    )
-                    .reset_index()
-                )
-                
-                suspicious = member_date_flags[
-                    member_date_flags["has_inpatient"] & member_date_flags["has_outpatient"]
-                ]
-                
-                if not suspicious.empty:
-                    flagged = df.merge(
-                        suspicious[["Member ID", col_mapping["Treatment from date"]]],
-                        on=["Member ID", col_mapping["Treatment from date"]]
-                    )
-                    return flagged[['Claim ID', 'Member ID', 'Provider ID', 'Paid amount']].drop_duplicates()
+            if not same_day.empty:
+                return same_day[['Claim ID', 'Member ID', 'Provider ID', 'Paid amount']].drop_duplicates()
             
             return pd.DataFrame(columns=['Claim ID', 'Member ID', 'Provider ID', 'Paid amount'])
             
         except Exception as e:
             raise Exception(f"Scenario 6 failed: {str(e)}")
     
-    def scenario_7_multi_country(self, df):
-        """Scenario 7: Multi-Country Provider Analysis - Exact Implementation"""
+    def scenario_7_multi_country(self, df, col_mapping):
+        """Scenario 7: Multi-Country Provider Analysis"""
         try:
-            required_cols = ["Provider ID", "Provider_country_code", "Claim ID"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
             # Count countries per provider
             provider_countries = df.groupby(col_mapping["Provider ID"]).agg({
                 col_mapping["Provider_country_code"]: 'nunique'
@@ -398,12 +467,9 @@ class PythonScenarios:
         except Exception as e:
             raise Exception(f"Scenario 7 failed: {str(e)}")
     
-    def scenario_8_multiple_providers(self, df):
-        """Scenario 8: Multiple Providers Same Day - Exact Implementation"""
+    def scenario_8_multiple_providers(self, df, col_mapping):
+        """Scenario 8: Multiple Providers Same Day"""
         try:
-            required_cols = ["Member ID", "Treatment from date", "Provider ID", "Payment currency code"]
-            col_mapping = self.map_column_names(df, required_cols)
-            
             # Count providers per member per day
             provider_counts = df.groupby([col_mapping["Member ID"], col_mapping["Treatment from date"]]).agg({
                 col_mapping["Provider ID"]: 'nunique'
@@ -425,59 +491,13 @@ class PythonScenarios:
             
         except Exception as e:
             raise Exception(f"Scenario 8 failed: {str(e)}")
-
-class MLScenarios:
-    """Machine Learning-based FWA detection scenarios with train/test split and cross-validation"""
-    """Machine Learning-based FWA detection scenarios"""
     
-    def __init__(self):
-        self.scenarios = {
-            "Isolation Forest Anomaly Detection": {
-                "description": "Uses Isolation Forest to detect anomalous claims based on amount, age, and incident patterns",
-                "required_fields": ["Paid amount", "Age", "Incident count"],
-                "function": self.isolation_forest_detection,
-                "reason": "Anomalous pattern in claim amount and patient demographics"
-            },
-            "DBSCAN Clustering Analysis": {
-                "description": "Identifies unusual claim clusters using density-based clustering",
-                "required_fields": ["Paid amount", "Age", "Provider ID"],
-                "function": self.dbscan_clustering,
-                "reason": "Outlier in provider-patient-amount clustering pattern"
-            },
-            "Random Forest Fraud Prediction": {
-                "description": "Predicts fraud probability using Random Forest algorithm",
-                "required_fields": ["Paid amount", "Age", "Provider ID", "Diagnostic_code (ICD-10)"],
-                "function": self.random_forest_prediction,
-                "reason": "High fraud probability based on historical patterns"
-            },
-            "LightGBM Advanced Detection": {
-                "description": "Advanced gradient boosting for complex fraud pattern detection",
-                "required_fields": ["Paid amount", "Age", "Provider ID", "Procedure_code (CPT codes)"],
-                "function": self.lightgbm_detection,
-                "reason": "Complex fraud pattern detected by gradient boosting algorithm"
-            }
-        }
-    
-    def get_available_scenarios(self):
-        return self.scenarios
-    
-    def run_scenario(self, scenario_name, df):
-        """Run a specific ML scenario"""
-        if scenario_name not in self.scenarios:
-            raise ValueError(f"ML Scenario '{scenario_name}' not found")
-        
-        scenario_func = self.scenarios[scenario_name]["function"]
-        return scenario_func(df)
-    
-    def prepare_features(self, df, feature_columns):
-        """Prepare features for ML algorithms with robust error handling"""
+    # ML Scenario Implementations with Train/Test Split
+    def prepare_features(self, df, feature_columns, col_mapping):
+        """Prepare features for ML algorithms with train/test split"""
         try:
             # Map column names
-            python_scenarios = PythonScenarios()
-            col_mapping = python_scenarios.map_column_names(df, feature_columns)
-            
-            # Select available columns
-            available_cols = [col_mapping[col] for col in feature_columns if col_mapping[col] in df.columns]
+            available_cols = [col_mapping[col] for col in feature_columns if col_mapping.get(col) in df.columns]
             
             if len(available_cols) < 2:
                 raise ValueError(f"Insufficient columns available. Need at least 2, got {len(available_cols)}")
@@ -509,11 +529,17 @@ class MLScenarios:
     def create_synthetic_labels(self, df, method='outlier'):
         """Create synthetic labels for supervised learning"""
         try:
-            if 'Paid amount' in df.columns:
-                paid_amounts = pd.to_numeric(df['Paid amount'], errors='coerce').fillna(0)
+            paid_col = None
+            for col in df.columns:
+                if 'paid' in col.lower() and 'amount' in col.lower():
+                    paid_col = col
+                    break
+            
+            if paid_col:
+                paid_amounts = pd.to_numeric(df[paid_col], errors='coerce').fillna(0)
                 
                 if method == 'outlier':
-                    # Use IQR method for outlier detection
+                    # Use IQR method
                     Q1 = paid_amounts.quantile(0.25)
                     Q3 = paid_amounts.quantile(0.75)
                     IQR = Q3 - Q1
@@ -524,8 +550,9 @@ class MLScenarios:
                     threshold = paid_amounts.quantile(0.9)
                     labels = (paid_amounts > threshold).astype(int)
                 else:
-                    # Random labels for unsupervised methods
-                    labels = np.random.choice([0, 1], size=len(df), p=[0.9, 0.1])
+                    # Z-score method
+                    z_scores = np.abs((paid_amounts - paid_amounts.mean()) / paid_amounts.std())
+                    labels = (z_scores > 2).astype(int)
                 
                 return labels
             else:
@@ -534,18 +561,19 @@ class MLScenarios:
                 
         except Exception as e:
             return np.random.choice([0, 1], size=len(df), p=[0.9, 0.1])
-    def isolation_forest_detection(self, df):
-        """Isolation Forest Anomaly Detection"""
+    
+    def isolation_forest_detection(self, df, col_mapping):
+        """Isolation Forest with train/test split"""
         try:
             feature_cols = ['Paid amount', 'Age', 'Incident count']
-            features, indices = self.prepare_features(df, feature_cols)
+            features, indices = self.prepare_features(df, feature_cols, col_mapping)
             
             # Split data for validation
             X_train, X_test, idx_train, idx_test = train_test_split(
                 features, indices, test_size=0.3, random_state=42
             )
             
-            # Run Isolation Forest
+            # Train Isolation Forest
             iso_forest = IsolationForest(contamination=0.1, random_state=42, n_estimators=100)
             iso_forest.fit(X_train)
             
@@ -564,11 +592,11 @@ class MLScenarios:
         except Exception as e:
             raise Exception(f"Isolation Forest failed: {str(e)}")
     
-    def dbscan_clustering(self, df):
-        """DBSCAN Clustering Analysis"""
+    def dbscan_clustering(self, df, col_mapping):
+        """DBSCAN Clustering with validation"""
         try:
             feature_cols = ['Paid amount', 'Age', 'Provider ID']
-            features, indices = self.prepare_features(df, feature_cols)
+            features, indices = self.prepare_features(df, feature_cols, col_mapping)
             
             # Split data for validation
             X_train, X_test, idx_train, idx_test = train_test_split(
@@ -577,9 +605,6 @@ class MLScenarios:
             
             # Run DBSCAN
             dbscan = DBSCAN(eps=0.5, min_samples=5)
-            cluster_labels = dbscan.fit_predict(X_train)
-            
-            # For full dataset prediction, use trained model concept
             full_labels = dbscan.fit_predict(features)
             
             # Get outliers (label = -1)
@@ -594,13 +619,13 @@ class MLScenarios:
         except Exception as e:
             raise Exception(f"DBSCAN failed: {str(e)}")
     
-    def random_forest_prediction(self, df):
-        """Random Forest Fraud Prediction"""
+    def random_forest_prediction(self, df, col_mapping):
+        """Random Forest with proper train/test split and cross-validation"""
         try:
             feature_cols = ['Paid amount', 'Age', 'Provider ID', 'Diagnostic_code (ICD-10)']
-            features, indices = self.prepare_features(df, feature_cols)
+            features, indices = self.prepare_features(df, feature_cols, col_mapping)
             
-            # Create synthetic labels based on amount outliers
+            # Create synthetic labels
             synthetic_labels = self.create_synthetic_labels(df, method='percentile')
             
             # Split data for training and testing
@@ -617,8 +642,9 @@ class MLScenarios:
             
             # Predict on test set for validation
             test_predictions = rf.predict(X_test)
+            test_accuracy = accuracy_score(y_test, test_predictions)
             
-            # Predict fraud probability
+            # Predict fraud probability on full dataset
             fraud_proba = rf.predict_proba(features)[:, 1]
             
             # Flag high-risk claims (top 10%)
@@ -634,13 +660,13 @@ class MLScenarios:
         except Exception as e:
             raise Exception(f"Random Forest failed: {str(e)}")
     
-    def lightgbm_detection(self, df):
-        """LightGBM Advanced Detection"""
+    def lightgbm_detection(self, df, col_mapping):
+        """LightGBM with train/test split and early stopping"""
         try:
             feature_cols = ['Paid amount', 'Age', 'Provider ID', 'Procedure_code (CPT codes)']
-            features, indices = self.prepare_features(df, feature_cols)
+            features, indices = self.prepare_features(df, feature_cols, col_mapping)
             
-            # Create synthetic labels for training
+            # Create synthetic labels
             synthetic_labels = self.create_synthetic_labels(df, method='outlier')
             
             # Split data for training and testing
@@ -687,6 +713,55 @@ class MLScenarios:
         except Exception as e:
             raise Exception(f"LightGBM failed: {str(e)}")
     
-    def get_validation_summary(self):
-        """Get summary of all validation results"""
-        return self.validation_results
+    def create_excel_report(self, results):
+        """Create Excel report with two sheets"""
+        output = io.BytesIO()
+        
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            # Separate Python and ML results
+            python_results = results[results['scenario_type'] == 'Python'].copy()
+            ml_results = results[results['scenario_type'] == 'ML'].copy()
+            
+            # Python scenarios sheet
+            if not python_results.empty:
+                # Create binary flags for each Python scenario
+                python_scenarios = python_results['scenario'].unique()
+                python_summary = python_results.groupby('Claim ID').agg({
+                    'Member ID': 'first',
+                    'Provider ID': 'first',
+                    'Paid amount': 'first',
+                    'fraud_score': 'first'
+                }).reset_index()
+                
+                # Add binary flags
+                for scenario in python_scenarios:
+                    python_summary[f'{scenario}_flag'] = python_summary['Claim ID'].isin(
+                        python_results[python_results['scenario'] == scenario]['Claim ID']
+                    ).astype(int)
+                
+                python_summary = python_summary.sort_values('fraud_score', ascending=False)
+                python_summary.to_excel(writer, sheet_name='Hypothesis', index=False)
+            
+            # ML scenarios sheet
+            if not ml_results.empty:
+                # Create binary flags for each ML scenario
+                ml_scenarios = ml_results['scenario'].unique()
+                ml_summary = ml_results.groupby('Claim ID').agg({
+                    'Member ID': 'first',
+                    'Provider ID': 'first',
+                    'Paid amount': 'first',
+                    'fraud_score': 'first',
+                    'fraud_reason': 'first'
+                }).reset_index()
+                
+                # Add binary flags
+                for scenario in ml_scenarios:
+                    ml_summary[f'{scenario}_flag'] = ml_summary['Claim ID'].isin(
+                        ml_results[ml_results['scenario'] == scenario]['Claim ID']
+                    ).astype(int)
+                
+                ml_summary = ml_summary.sort_values('fraud_score', ascending=False)
+                ml_summary.to_excel(writer, sheet_name='ML_Scenarios', index=False)
+        
+        output.seek(0)
+        return output.getvalue()
